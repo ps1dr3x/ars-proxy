@@ -1,0 +1,9 @@
+[package]
+name = "ars-proxy"
+version = "0.1.0"
+authors = ["Michele Federici (@ps1dr3x) <michele@federici.tech>"]
+
+[dependencies]
+futures = "0.1.23"
+hyper = "0.12"
+hyper-tls = "0.3.0"
