@@ -1,16 +1,29 @@
 extern crate futures;
+extern crate native_tls;
+extern crate tokio;
+extern crate tokio_tls;
 extern crate hyper;
 extern crate hyper_tls;
 
+mod utils;
+
 use std::{
-    env,
+    path::Path,
+    fs::File,
+    io::Read,
     sync::mpsc::{
         Sender,
         Receiver,
         channel
     }
 };
-use futures::future;
+use futures::{
+    future,
+    stream::Stream
+};
+use native_tls::{ Identity, TlsAcceptor };
+use tokio::net::TcpListener;
+use tokio_tls::TlsAcceptorExt;
 use hyper::{
     Uri,
     Body,
@@ -18,6 +31,7 @@ use hyper::{
     Response,
     Client,
     Server,
+    server::conn::Http,
     service::service_fn,
     header::HeaderValue,
     rt::{
@@ -26,49 +40,21 @@ use hyper::{
     }
 };
 use hyper_tls::HttpsConnector;
+use utils::Conf;
 
 type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 
-#[derive(Debug, Clone)]
-pub struct Conf {
-    pub local_port: u16,
-    pub remote_url: String,
-    pub remote_port: u16,
-    pub to_https: bool
-}
-
-const USAGE: &'static str = "\nUsage:\nars-proxy <local_port> <remote_url> <remote_port> [--to-https]\n";
+pub const USAGE: &'static str = "\nUsage:\nars-proxy <local_port> <remote_url> <remote_port> [--cert <crt_path> --pass-file <pass_file_path>] [--to-https]\n";
 
 fn main() {
-    let mut args = env::args();
-    let conf = Conf {
-        local_port: args
-            .nth(1)
-            .expect(USAGE)
-            .parse()
-            .expect(&format!("Error while parsing local_port argument {}", USAGE)),
-        remote_url: args
-            .next()
-            .expect(USAGE),
-        remote_port: args
-            .next()
-            .expect(USAGE)
-            .parse()
-            .expect(&format!("Error while parsing remote_port argument {}", USAGE)),
-        to_https: {
-            let arg = args.next();
-            if arg.is_none() {
-                false
-            } else {
-                let arg = arg.unwrap();
-                if arg != "--to-https" {
-                    println!("Invalid parameter: {}", arg);
-                    panic!(USAGE);
-                }
-                true
-            }
-        }
-    };
+    println!("\nars-proxy v0.1.0");
+
+    let conf = utils::get_cli_params();
+    if conf.is_err() {
+        println!("\nError: {}\n{}", conf.err().unwrap(), USAGE);
+        ::std::process::exit(1);
+    }
+    let conf = conf.unwrap();
 
     let service_conf = conf.clone();
     let service = move || {
@@ -80,19 +66,83 @@ fn main() {
     };
 
     let local_addr = ([127, 0, 0, 1], conf.local_port).into();
-    let server = Server::bind(&local_addr)
-        .serve(service)
-        .map_err(|e| eprintln!("Server error: {}", e));
 
-    println!(
-        "Listening on http://{}\nProxying to {}://{}:{}",
-        local_addr,
-        if conf.to_https { "https" } else { "http" },
-        conf.remote_url,
-        conf.remote_port
-    );
+    if conf.https_crt.is_some() {
+        let crt_path = conf.https_crt.unwrap();
+        let mut crt_file = File::open(
+            Path::new(&crt_path)
+        ).expect(&format!("Certificate file \"{}\" not found (or not accessible)", crt_path));
+        let mut identity = vec![];
+        crt_file.read_to_end(&mut identity).unwrap();
 
-    rt::run(server);
+        let mut pass = vec![];
+        if conf.https_crt_pass_file.is_some() {
+            let crt_pass_file_path = conf.https_crt_pass_file.unwrap();
+            let mut crt_pass_file = File::open(
+                Path::new(&crt_pass_file_path)
+            ).expect(&format!("Certificate pass file \"{}\" not found (or not accessible)", crt_pass_file_path));
+            crt_pass_file.read_to_end(&mut pass).unwrap();
+        }
+
+        let cert = Identity::from_pkcs12(&identity, &String::from_utf8(pass).unwrap())
+            .expect("Error while opening certificate file (maybe wrong password?)");
+        let tls_cx = TlsAcceptor::builder(cert).build().unwrap();
+
+        let srv = TcpListener::bind(&local_addr)
+            .expect(&format!("Error binding local port: {}", conf.local_port));
+
+        let http_proto = Http::new();
+        let http_server = http_proto
+            .serve_incoming(
+                srv.incoming().and_then(move |socket| {
+                    tls_cx
+                        .accept_async(socket)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                }),
+                service,
+            )
+            .then(|res| {
+                match res {
+                    Ok(conn) => Ok(Some(conn)),
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        Ok(None)
+                    },
+                }
+            })
+            .for_each(|conn_opt| {
+                if let Some(conn) = conn_opt {
+                    hyper::rt::spawn(
+                        conn.and_then(|c| c.map_err(|e| panic!("Hyper error {}", e)))
+                            .map_err(|e| eprintln!("Connection error {}", e)),
+                    );
+                }
+                Ok(())
+            });
+
+        println!(
+            "\nListening on https://{}\nProxying to https://{}:{}",
+            local_addr,
+            conf.remote_url,
+            conf.remote_port
+        );
+
+        rt::run(http_server);
+    } else {
+        let server = Server::bind(&local_addr)
+            .serve(service)
+            .map_err(|e| eprintln!("Server error: {}", e));
+
+        println!(
+            "\nListening on http://{}\nProxying to {}://{}:{}",
+            local_addr,
+            if conf.to_https { "https" } else { "http" },
+            conf.remote_url,
+            conf.remote_port
+        );
+
+        rt::run(server);
+    }
 }
 
 fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
@@ -100,10 +150,15 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
     let tx_err = tx.clone();
 
     let url = format!(
-        "{}://{}:{}",
-        if conf.to_https { "https" } else { "http" },
+        "{}://{}:{}{}",
+        if conf.to_https || conf.https_crt.is_some() {
+            "https"
+        } else {
+            "http"
+        },
         conf.remote_url,
-        conf.remote_port
+        conf.remote_port,
+        req.uri()
     ).parse().unwrap();
 
     let req = request(req, url)

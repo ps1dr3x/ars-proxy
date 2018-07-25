@@ -5,5 +5,8 @@ authors = ["Michele Federici (@ps1dr3x) <michele@federici.tech>"]
 
 [dependencies]
 futures = "0.1.23"
+native-tls = "0.2"
+tokio = "0.1.7"
+tokio-tls = { git = "https://github.com/ps1dr3x/tokio-tls", branch = "new-tokio" }
 hyper = "0.12"
 hyper-tls = "0.3.0"
