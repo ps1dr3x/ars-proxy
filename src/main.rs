@@ -31,7 +31,6 @@ use hyper::{
     Response,
     Client,
     Server,
-    server::conn::Http,
     service::service_fn,
     header::HeaderValue,
     rt::{
@@ -56,93 +55,77 @@ fn main() {
     }
     let conf = conf.unwrap();
 
-    let service_conf = conf.clone();
-    let service = move || {
-        let conf = service_conf.clone();
+    println!(
+        "\nStarting server on {}://127.0.0.1:{}\nProxying to {}://{}:{}",
+        if conf.https_crt.is_some() {
+            "https"
+        } else {
+            "http"
+        },
+        conf.local_port,
+        if conf.to_https || conf.https_crt.is_some() {
+            "https"
+        } else {
+            "http"
+        },
+        conf.remote_url,
+        conf.remote_port
+    );
 
-        service_fn(move |req| {
-            proxy(conf.clone(), req)
-        })
+    loop { server(conf.clone()) }
+}
+
+fn server(conf: Conf) {
+    let local_addr = ([127, 0, 0, 1], conf.local_port).into();
+    let listener = TcpListener::bind(&local_addr)
+        .expect(&format!("Error binding local port: {}", conf.local_port));
+
+    let ps_conf = conf.clone();
+    let proxy_service = move || {
+        let conf = ps_conf.clone();
+        service_fn(move |req| proxy(conf.clone(), req))
     };
 
-    let local_addr = ([127, 0, 0, 1], conf.local_port).into();
-
     if conf.https_crt.is_some() {
-        let crt_path = conf.https_crt.unwrap();
-        let mut crt_file = File::open(
-            Path::new(&crt_path)
-        ).expect(&format!("Certificate file \"{}\" not found (or not accessible)", crt_path));
-        let mut identity = vec![];
-        crt_file.read_to_end(&mut identity).unwrap();
+        let conf = conf.clone();
+        let tls_stream = listener.incoming()
+            .and_then(move |socket| {
+                let server_conf = conf.clone();
 
-        let mut pass = vec![];
-        if conf.https_crt_pass_file.is_some() {
-            let crt_pass_file_path = conf.https_crt_pass_file.unwrap();
-            let mut crt_pass_file = File::open(
-                Path::new(&crt_pass_file_path)
-            ).expect(&format!("Certificate pass file \"{}\" not found (or not accessible)", crt_pass_file_path));
-            crt_pass_file.read_to_end(&mut pass).unwrap();
-        }
+                let crt_path = server_conf.https_crt.unwrap();
+                let mut crt_file = File::open(
+                    Path::new(&crt_path)
+                ).expect(&format!("Certificate file \"{}\" not found (or not accessible)", crt_path));
+                let mut identity = vec![];
+                crt_file.read_to_end(&mut identity).unwrap();
 
-        let cert = Identity::from_pkcs12(&identity, &String::from_utf8(pass).unwrap())
-            .expect("Error while opening certificate file (maybe wrong password?)");
-        let tls_cx = TlsAcceptor::builder(cert).build().unwrap();
-
-        let srv = TcpListener::bind(&local_addr)
-            .expect(&format!("Error binding local port: {}", conf.local_port));
-
-        let http_proto = Http::new();
-        let http_server = http_proto
-            .serve_incoming(
-                srv.incoming().and_then(move |socket| {
-                    tls_cx
-                        .accept_async(socket)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                }),
-                service,
-            )
-            .then(|res| {
-                match res {
-                    Ok(conn) => Ok(Some(conn)),
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        Ok(None)
-                    },
+                let mut pass = vec![];
+                if server_conf.https_crt_pass_file.is_some() {
+                    let crt_pass_file_path = server_conf.https_crt_pass_file.unwrap();
+                    let mut crt_pass_file = File::open(
+                        Path::new(&crt_pass_file_path)
+                    ).expect(&format!("Certificate pass file \"{}\" not found (or not accessible)", crt_pass_file_path));
+                    crt_pass_file.read_to_end(&mut pass).unwrap();
                 }
-            })
-            .for_each(|conn_opt| {
-                if let Some(conn) = conn_opt {
-                    hyper::rt::spawn(
-                        conn.and_then(|c| c.map_err(|e| panic!("Hyper error {}", e)))
-                            .map_err(|e| eprintln!("Connection error {}", e)),
-                    );
-                }
-                Ok(())
+
+                let cert = Identity::from_pkcs12(&identity, &String::from_utf8(pass).unwrap())
+                    .expect("Error while opening certificate file (maybe wrong password?)");
+                let tls_cx = TlsAcceptor::builder(cert).build().unwrap();
+                tls_cx
+                    .accept_async(socket)
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, e)
+                    })
             });
 
-        println!(
-            "\nListening on https://{}\nProxying to https://{}:{}",
-            local_addr,
-            conf.remote_url,
-            conf.remote_port
-        );
-
-        rt::run(http_server);
-    } else {
-        let server = Server::bind(&local_addr)
-            .serve(service)
+        let server = Server::builder(tls_stream).serve(proxy_service)
             .map_err(|e| eprintln!("Server error: {}", e));
-
-        println!(
-            "\nListening on http://{}\nProxying to {}://{}:{}",
-            local_addr,
-            if conf.to_https { "https" } else { "http" },
-            conf.remote_url,
-            conf.remote_port
-        );
-
         rt::run(server);
-    }
+    } else {
+        let server = Server::builder(listener.incoming()).serve(proxy_service)
+            .map_err(|e| eprintln!("Server error: {}", e));
+        rt::run(server);
+    };
 }
 
 fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
