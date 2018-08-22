@@ -10,18 +10,13 @@ mod utils;
 use std::{
     path::Path,
     fs::File,
-    io::Read
-};
-use futures::{
-    future,
-    sink::Sink,
-    stream::Stream,
-    sync::mpsc::{
-        Sender,
-        Receiver,
-        channel
+    io::Read,
+    time::{
+        SystemTime,
+        UNIX_EPOCH
     }
 };
+use futures::stream::Stream;
 use native_tls::{ Identity, TlsAcceptor };
 use tokio::net::TcpListener;
 use tokio_tls::TlsAcceptorExt;
@@ -47,7 +42,7 @@ type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 pub const USAGE: &'static str = "\nUsage:\nars-proxy <local_port> <remote_url> <remote_port> [--cert <crt_path> --pass-file <pass_file_path>] [--to-https]\n";
 
 fn main() {
-    println!("\nars-proxy v0.1.0");
+    println!("\nars-proxy v0.1.0\n");
 
     let conf = utils::get_cli_params();
     if conf.is_err() {
@@ -57,7 +52,7 @@ fn main() {
     let conf = conf.unwrap();
 
     println!(
-        "\nStarting server on {}://127.0.0.1:{}\nProxying to {}://{}:{}",
+        "Starting server on {}://127.0.0.1:{}\nProxying to {}://{}:{}\n",
         if conf.https_crt.is_some() {
             "https"
         } else {
@@ -130,10 +125,6 @@ fn server(conf: Conf) {
 }
 
 fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
-    let (tx_ok, rx): (Sender<Response<Body>>, Receiver<Response<Body>>) = channel(1);
-    let tx_err = tx_ok.clone();
-    let mut rx = rx.wait();
-
     let url = format!(
         "{}://{}:{}{}",
         if conf.to_https || conf.https_crt.is_some() {
@@ -146,20 +137,23 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
         req.uri()
     ).parse().unwrap();
 
-    let req = request(req, url)
-        .map(move |res| {
-            let (parts, body) = res.into_parts();
-            tx_ok.send(Response::from_parts(parts, body)).wait().unwrap();
-        })
-        .map_err(move |e| {
-            eprintln!("Proxied request error: {}", e);
-            tx_err.send(Response::new(Body::from(e.to_string()))).wait().unwrap();
-        });
+    println!(
+        "[{:?}] {} {}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        req.method(),
+        req.uri()
+    );
 
-    rt::spawn(req);
-
-    let response = rx.next().unwrap().unwrap();
-    Box::new(future::ok(response))
+    Box::new(
+        request(req, url)
+            .map(move |res| {
+                let (parts, body) = res.into_parts();
+                Response::from_parts(parts, body)
+            })
+    )
 }
 
 fn request(req: Request<Body>, url: Uri) -> impl Future<Item=Response<Body>, Error=hyper::Error> {
