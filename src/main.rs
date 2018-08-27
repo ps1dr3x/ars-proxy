@@ -153,6 +153,10 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
                 let (parts, body) = res.into_parts();
                 Response::from_parts(parts, body)
             })
+            .map_err(|e| {
+                eprintln!("Request error: {}", e);
+                e
+            })
     )
 }
 
