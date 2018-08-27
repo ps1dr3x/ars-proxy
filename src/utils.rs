@@ -1,4 +1,10 @@
-use std::env;
+use std::{
+    env,
+    time::{
+        SystemTime,
+        UNIX_EPOCH
+    }
+};
 
 #[derive(Debug, Clone)]
 pub struct Conf {
@@ -70,4 +76,11 @@ pub fn get_cli_params() -> Result<Conf, String> {
     }
 
     Ok(conf)
+}
+
+pub fn timestamp() -> u64 {
+    SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
 }

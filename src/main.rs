@@ -10,11 +10,7 @@ mod utils;
 use std::{
     path::Path,
     fs::File,
-    io::Read,
-    time::{
-        SystemTime,
-        UNIX_EPOCH
-    }
+    io::Read
 };
 use futures::stream::Stream;
 use native_tls::{ Identity, TlsAcceptor };
@@ -35,7 +31,7 @@ use hyper::{
     }
 };
 use hyper_tls::HttpsConnector;
-use utils::Conf;
+use utils::{ Conf, timestamp };
 
 type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 
@@ -46,7 +42,7 @@ fn main() {
 
     let conf = utils::get_cli_params();
     if conf.is_err() {
-        println!("\nError: {}\n{}", conf.err().unwrap(), USAGE);
+        println!("[{}][ERROR] Configuration error: {}\n{}", timestamp(), conf.err().unwrap(), USAGE);
         ::std::process::exit(1);
     }
     let conf = conf.unwrap();
@@ -115,11 +111,11 @@ fn server(conf: Conf) {
             });
 
         let server = Server::builder(tls_stream).serve(proxy_service)
-            .map_err(|e| eprintln!("Server error: {}", e));
+            .map_err(|e| eprintln!("[{}][ERROR] Server error: {}", timestamp(), e));
         rt::run(server);
     } else {
         let server = Server::builder(listener.incoming()).serve(proxy_service)
-            .map_err(|e| eprintln!("Server error: {}", e));
+            .map_err(|e| eprintln!("[{}][ERROR] Server error: {}", timestamp(), e));
         rt::run(server);
     };
 }
@@ -138,11 +134,8 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
     ).parse().unwrap();
 
     println!(
-        "[{:?}] {} {}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        "[{}][INFO] {} {}",
+        timestamp(),
         req.method(),
         req.uri()
     );
@@ -154,7 +147,7 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
                 Response::from_parts(parts, body)
             })
             .map_err(|e| {
-                eprintln!("Request error: {}", e);
+                eprintln!("[{}][ERROR] Request error: {}", timestamp(), e);
                 e
             })
     )
