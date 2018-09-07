@@ -48,7 +48,7 @@ fn main() {
     let conf = conf.unwrap();
 
     println!(
-        "Starting server on {}://127.0.0.1:{}\nProxying to {}://{}:{}\n",
+        "Starting server on {}://0.0.0.0:{}\nProxying to {}://{}:{}\n",
         if conf.https_crt.is_some() {
             "https"
         } else {
@@ -68,7 +68,7 @@ fn main() {
 }
 
 fn server(conf: Conf) {
-    let local_addr = ([127, 0, 0, 1], conf.local_port).into();
+    let local_addr = ([0, 0, 0, 0], conf.local_port).into();
     let listener = TcpListener::bind(&local_addr)
         .expect(&format!("Error binding local port: {}", conf.local_port));
 
