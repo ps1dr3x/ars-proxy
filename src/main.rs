@@ -13,9 +13,8 @@ use std::{
     io::Read
 };
 use futures::stream::Stream;
-use native_tls::{ Identity, TlsAcceptor };
+use native_tls::Identity;
 use tokio::net::TcpListener;
-use tokio_tls::TlsAcceptorExt;
 use hyper::{
     Uri,
     Body,
@@ -38,7 +37,7 @@ type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 pub const USAGE: &'static str = "\nUsage:\nars-proxy <local_port> <remote_url> <remote_port> [--cert <crt_path> --pass-file <pass_file_path>] [--to-https]\n";
 
 fn main() {
-    println!("\nars-proxy v0.1.0\n");
+    println!("\nars-proxy v0.1.1\n");
 
     let conf = utils::get_cli_params();
     if conf.is_err() {
@@ -64,18 +63,25 @@ fn main() {
         conf.remote_port
     );
 
-    loop { server(conf.clone()) }
+    loop {
+        server(conf.clone());
+        println!("Server crashed! Restarting...");
+    }
 }
 
 fn server(conf: Conf) {
     let local_addr = ([0, 0, 0, 0], conf.local_port).into();
+
     let listener = TcpListener::bind(&local_addr)
         .expect(&format!("Error binding local port: {}", conf.local_port));
 
     let ps_conf = conf.clone();
     let proxy_service = move || {
+        let https = HttpsConnector::new(4).expect("TLS initialization failed");
+        let client = Client::builder()
+            .build::<_, hyper::Body>(https);
         let conf = ps_conf.clone();
-        service_fn(move |req| proxy(conf.clone(), req))
+        service_fn(move |req| proxy(client.clone(), conf.clone(), req))
     };
 
     if conf.https_crt.is_some() {
@@ -102,9 +108,11 @@ fn server(conf: Conf) {
 
                 let cert = Identity::from_pkcs12(&identity, &String::from_utf8(pass).unwrap())
                     .expect("Error while opening certificate file (maybe wrong password?)");
-                let tls_cx = TlsAcceptor::builder(cert).build().unwrap();
-                tls_cx
-                    .accept_async(socket)
+                let tls_acceptor = tokio_tls::TlsAcceptor::from(
+                    native_tls::TlsAcceptor::builder(cert).build().unwrap()
+                );
+                tls_acceptor
+                    .accept(socket)
                     .map_err(|e| {
                         std::io::Error::new(std::io::ErrorKind::Other, e)
                     })
@@ -120,7 +128,11 @@ fn server(conf: Conf) {
     };
 }
 
-fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
+fn proxy(
+    client: Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>,
+    conf: Conf,
+    req: Request<Body>
+) -> BoxFut {
     let url = format!(
         "{}://{}:{}{}",
         if conf.to_https || conf.https_crt.is_some() {
@@ -141,7 +153,7 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
     );
 
     Box::new(
-        request(req, url)
+        request(client, req, url)
             .map(move |res| {
                 let (parts, body) = res.into_parts();
                 Response::from_parts(parts, body)
@@ -153,7 +165,10 @@ fn proxy(conf: Conf, req: Request<Body>) -> BoxFut {
     )
 }
 
-fn request(req: Request<Body>, url: Uri) -> impl Future<Item=Response<Body>, Error=hyper::Error> {
+fn request(
+    client: Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>,
+    req: Request<Body>, url: Uri
+) -> impl Future<Item=Response<Body>, Error=hyper::Error> {
     let (mut parts, body) = req.into_parts();
 
     if parts.headers.contains_key("host") {
@@ -170,8 +185,5 @@ fn request(req: Request<Body>, url: Uri) -> impl Future<Item=Response<Body>, Err
     *proxied_req.uri_mut() = url;
     *proxied_req.headers_mut() = parts.headers;
 
-    let https = HttpsConnector::new(4).expect("TLS initialization failed");
-    let client = Client::builder()
-        .build::<_, hyper::Body>(https);
     client.request(proxied_req)
 }
